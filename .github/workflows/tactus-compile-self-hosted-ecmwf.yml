@@ -1,0 +1,104 @@
+name: Tactus Compile (self-hosted ECMWF)
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      ial_tag:
+        description: IAL ref to check out. Mutually exclusive with ial_git_version.
+        type: string
+        default: ""
+      ial_git_version:
+        description: IAL ref to check out. Mutually exclusive with ial_tag.
+        type: string
+        default: ""
+      dry_run:
+        description: Only generate the compile config, do not submit
+        type: boolean
+        default: false
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GH_REPO_READ_TOKEN }}
+  TACTUS_WLM_ACCOUNT: ${{ vars.TACTUS_WLM_ACCOUNT }}
+  TACTUS_POLL_INTERVAL_SECONDS: ${{ vars.TACTUS_POLL_INTERVAL_SECONDS }}
+  TACTUS_SUITE_TIMEOUT_MINUTES: ${{ vars.TACTUS_SUITE_TIMEOUT_MINUTES }}
+
+concurrency:
+  group: tactus-compile-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  compile:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '--action-compile') ||
+      contains(github.event.pull_request.title, '--action-compile') ||
+      contains(github.event.pull_request.body, '--action-compile')
+    runs-on: [self-hosted, tactus]
+    timeout-minutes: 180
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Free local disk (poetry venv + cache)
+        uses: ./.github/actions/free-local-disk
+
+      - name: Set github credentials
+        uses: ./.github/actions/setup-github-credentials
+        with:
+          github_token: ${{ env.GITHUB_TOKEN }}
+
+      - id: resolve
+        name: Resolve IAL ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/.github/sh/helpers.sh"
+          ial_ref=$(ci_resolve_ial_ref "${{ github.event.inputs.ial_tag }}" "${{ github.event.inputs.ial_git_version }}")
+          if [ -z "$ial_ref" ]; then
+            ial_ref=$(grep -A5 '^\[compile\]' tactus/data/config_files/config.toml | grep 'ial_git_version' | head -1 | sed -E 's/.*=\s*"([^"]*)".*/\1/')
+          fi
+          echo "ial_ref=$ial_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure poetry on HPC
+        uses: ./.github/actions/ensure-poetry
+
+      - name: Point .venv at $SCRATCH
+        uses: ./.github/actions/setup-venv-scratch
+
+      - name: Install the project (on HPC)
+        shell: bash
+        run: |
+          source "$GITHUB_WORKSPACE/.github/sh/helpers.sh"
+          helper_py_exec poetry install --no-interaction
+
+      - id: compile
+        name: Compile via tactus
+        uses: ./.github/actions/run-compile
+        with:
+          ial_tag: ${{ steps.resolve.outputs.ial_ref }}
+          dry_run: ${{ github.event.inputs.dry_run || 'false' }}
+
+      - name: Cancel suites
+        if: cancelled()
+        uses: ./.github/actions/cancel-tactus-run
+
+      - name: Upload compile logs
+        if: always() && github.event.inputs.dry_run != 'true' && steps.compile.outputs.artifact_paths != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: tactus-compile-${{ github.run_id }}
+          path: ${{ steps.compile.outputs.artifact_paths }}
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Cleanup
+        if: always() && vars.TACTUS_ECF_SUITES_AUTO_CLEANUP == 'true'
+        uses: ./.github/actions/cleanup-tactus-run
+        with:
+          scope: compile
+          config_file: ${{ steps.compile.outputs.config_file }}
+
+      - name: Free local disk (poetry venv + cache)
+        if: always()
+        uses: ./.github/actions/free-local-disk

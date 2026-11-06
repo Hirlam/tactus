@@ -2154,7 +2154,7 @@ class CompilationFamily(EcflowSuiteFamily):
                 ecf_files,
                 ecf_files_remotely=ecf_files_remotely,
             )
-            EcflowSuiteTask(
+            build_task = EcflowSuiteTask(
                 "TactusBundleBuild",
                 prec_familiy,
                 config,
@@ -2168,3 +2168,14 @@ class CompilationFamily(EcflowSuiteFamily):
                 },
                 trigger=EcflowSuiteTriggers(EcflowSuiteTrigger(create_bundle)),
             )
+            ci_monitor = EcflowSuiteTask(
+                "CIMonitor",
+                prec_familiy,
+                config,
+                task_settings,
+                ecf_files,
+                input_template=input_template,
+                ecf_files_remotely=ecf_files_remotely,
+                variables={"ARGS": f"context=compile;build_path={build_task.path}"},
+            )
+            ci_monitor.add_always_trigger(build_task)

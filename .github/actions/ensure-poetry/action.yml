@@ -1,0 +1,14 @@
+name: Ensure poetry on HPC
+description: Fail if poetry is missing on hpc-batch
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure poetry on HPC
+      shell: bash
+      run: |
+        source "$GITHUB_WORKSPACE/.github/sh/helpers.sh"
+        helper_py_exec poetry --version || {
+          echo "::error::poetry not found on hpc-batch. Install it per README.md and add ~/.local/bin to PATH in ~/.bashrc (above any interactive-only return)." >&2
+          exit 1
+        }

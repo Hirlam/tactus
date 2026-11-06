@@ -1,0 +1,21 @@
+name: Cancel tactus run
+description: Suspend and kill the monitored suites
+
+runs:
+  using: composite
+  steps:
+    - name: Suspend and kill suites
+      shell: bash
+      run: |
+        set -uo pipefail
+        [ -f ci_monitor_target.txt ] || exit 0
+        source "$GITHUB_WORKSPACE/.github/sh/helpers.sh"
+        { read -r mode; read -r config; } < ci_monitor_target.txt
+        mapfile -t suites < <(
+          helper_py_exec python3 scripts/ci/monitor_suite.py --mode "$mode" --config "$config" --print-suites |
+            grep -E '^[A-Za-z0-9._-]+$'
+        )
+        if [ "${#suites[@]}" -gt 0 ]; then
+          bash scripts/ci/sweep_suites.sh --cancel "${suites[@]}"
+        fi
+        exit 0

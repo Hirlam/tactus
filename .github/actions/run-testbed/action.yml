@@ -1,0 +1,105 @@
+name: Run tactus testbed
+description: Run the tactus testbed
+
+inputs:
+  test_config:
+    description: Test-suite config
+    required: true
+  case_selection:
+    description: Comma-separated cases (empty = all)
+    required: false
+    default: ""
+  ial_version:
+    description: submission.ial_version override
+    required: false
+    default: ""
+
+outputs:
+  test_dir:
+    description: Per-case config directory
+    value: ${{ steps.configure.outputs.test_dir }}
+  run_tag:
+    description: Tag injected into every case
+    value: ${{ steps.configure.outputs.run_tag }}
+  resolved_config:
+    description: Generated test config
+    value: ${{ steps.configure.outputs.resolved_config }}
+  artifact_paths:
+    description: Staged artifact glob
+    value: ${{ steps.follow.outputs.artifact_paths }}
+  status:
+    description: PASS or FAIL
+    value: ${{ steps.follow.outputs.status }}
+
+runs:
+  using: composite
+  steps:
+    - id: configure
+      name: Generate per-case configs
+      shell: bash
+      run: |
+        set -euo pipefail
+        source "$GITHUB_WORKSPACE/.github/sh/helpers.sh"
+        config_file="ci_run_$(basename "${{ inputs.test_config }}")"
+        safe_branch=$(echo "${{ github.ref_name }}" | tr -c 'A-Za-z0-9._-' '_')
+        run_tag="${safe_branch}_${{ github.run_id }}_${{ github.run_attempt }}"
+        helper_py_exec python3 - "${{ inputs.test_config }}" "$config_file" "${{ inputs.case_selection }}" "$run_tag" \
+          ci_submission_override.toml \
+          "${TACTUS_WLM_ACCOUNT:-}" "${{ inputs.ial_version }}" <<'PYEOF'
+        import sys
+        import tomlkit
+
+        src, dest, selection, run_tag, mod_path, account, ial_version = sys.argv[1:8]
+        doc = tomlkit.parse(open(src).read())
+        if selection:
+            doc["general"]["selection"] = [c.strip() for c in selection.split(",") if c.strip()]
+        doc["general"]["tag"] = run_tag
+
+        extra = list(doc["general"].get("extra", []))
+
+        override = {}
+        if account:
+            override.setdefault("submission", {})["account"] = f"#SBATCH --account={account}"
+        if ial_version:
+            override.setdefault("submission", {})["ial_version"] = ial_version
+
+        if override:
+            with open(mod_path, "w") as f:
+                f.write(tomlkit.dumps(override))
+            extra.append(mod_path)
+
+        doc["general"]["extra"] = extra
+        with open(dest, "w") as f:
+            f.write(tomlkit.dumps(doc))
+        PYEOF
+        helper_py_exec poetry run tactus test -c "$config_file" -m
+        test_dir=$(helper_py_exec python3 -c "
+        import argparse
+        from tactus.test_runner import TestCases
+        args = argparse.Namespace(config_file='$config_file', verbose=False, dry=False, generate_refs=False)
+        print(TestCases(args=args).test_dir)
+        ")
+        echo "test_dir=$test_dir" >> "$GITHUB_OUTPUT"
+        echo "resolved_config=$config_file" >> "$GITHUB_OUTPUT"
+        echo "run_tag=$run_tag" >> "$GITHUB_OUTPUT"
+
+    - name: Start suites
+      shell: bash
+      run: |
+        source "$GITHUB_WORKSPACE/.github/sh/helpers.sh"
+        helper_py_exec poetry run tactus test -c "${{ steps.configure.outputs.resolved_config }}" -r
+
+    - id: follow
+      name: Follow suites and summarize
+      uses: ./.github/actions/monitor-tactus-suite
+      with:
+        mode: testbed
+        config_file: ${{ steps.configure.outputs.resolved_config }}
+        default_timeout_minutes: "240"
+
+    - name: Print final case table (informational only)
+      if: always()
+      shell: bash
+      run: |
+        source "$GITHUB_WORKSPACE/.github/sh/helpers.sh"
+        helper_py_exec poetry run tactus test -c "${{ steps.configure.outputs.resolved_config }}" || true

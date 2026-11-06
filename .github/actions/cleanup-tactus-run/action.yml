@@ -1,0 +1,44 @@
+name: Cleanup tactus CI run
+description: Remove ecFlow suites and ephemeral files of a CI run
+
+inputs:
+  scope:
+    description: "compile or testbed"
+    required: true
+  config_file:
+    description: Compile config (scope=compile)
+    required: false
+    default: ""
+  test_dir:
+    description: Per-case config directory (scope=testbed)
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Remove ecFlow suite(s) and ephemeral workspace
+      if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+        source "$GITHUB_WORKSPACE/.github/sh/helpers.sh"
+
+        if [ "${{ inputs.scope }}" = "compile" ] && [ -n "${{ inputs.config_file }}" ]; then
+          if [ -f "${{ inputs.config_file }}" ]; then
+            helper_py_exec poetry run tactus remove --execute-removal --force-remove "${{ inputs.config_file }}"
+          fi
+          rm -f "${{ inputs.config_file }}"
+        fi
+
+        if [ "${{ inputs.scope }}" = "testbed" ] && [ -n "${{ inputs.test_dir }}" ]; then
+          if [ -d "${{ inputs.test_dir }}" ]; then
+            for cfg in "${{ inputs.test_dir }}"/*.toml; do
+              [ -f "$cfg" ] || continue
+              helper_py_exec poetry run tactus remove --execute-removal --force-remove "$cfg"
+            done
+          fi
+          rm -rf "${{ inputs.test_dir }}"
+        fi
+
+        exit 0

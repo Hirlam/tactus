@@ -425,6 +425,15 @@ class EcflowNode:
             trigger_string,
         )
 
+    def add_always_trigger(self, upstream_node: "EcflowNode") -> None:
+        """Trigger this node once `upstream_node` is `complete` or `aborted`."""
+        if self.ecf_node is None:
+            return
+        trigger_string = (
+            f"{upstream_node.path} == complete or {upstream_node.path} == aborted"
+        )
+        self.ecf_node.add_trigger(self.make_relative(trigger_string))
+
 
 class EcflowNodeContainer(EcflowNode):
     """Ecflow node container."""

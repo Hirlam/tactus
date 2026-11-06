@@ -248,6 +248,18 @@ class EcflowServer(Server):
             except RuntimeError as err:
                 raise RuntimeError("Could not replace suite " + suite_name) from err
 
+    def get_node_state(self, path):
+        """Get the ecFlow state of the node at `path`, or None if it does not exist."""
+        self.ecf_client.sync_local()
+        node = self.ecf_client.get_defs().find_abs_node(path)
+        if node is None:
+            return None
+        return node.get_state()
+
+    def node_is_complete(self, path):
+        """Return True iff the node at `path` is `complete`."""
+        return self.get_node_state(path) == ecflow.State.complete
+
     def suite_is_complete(self, suite):
         """Returns the true if a suite is complete.
 

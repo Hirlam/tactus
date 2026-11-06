@@ -1,0 +1,146 @@
+name: Tactus Testbed (self-hosted ECMWF)
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      test_config:
+        description: Path to the test-suite config (relative to repo root)
+        required: false
+        default: tactus/data/tests/atos_bologna_CY49t2.toml
+      case_selection:
+        description: Comma-separated case names to restrict to (empty = all in test_config)
+        required: false
+        default: ""
+      ial_tag:
+        description: IAL ref to compile first and test against. Mutually exclusive with ial_git_version.
+        type: string
+        default: ""
+      ial_git_version:
+        description: IAL ref to compile first and test against. Mutually exclusive with ial_tag.
+        type: string
+        default: ""
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GH_REPO_READ_TOKEN }}
+  TACTUS_WLM_ACCOUNT: ${{ vars.TACTUS_WLM_ACCOUNT }}
+  TACTUS_POLL_INTERVAL_SECONDS: ${{ vars.TACTUS_POLL_INTERVAL_SECONDS }}
+  TACTUS_SUITE_TIMEOUT_MINUTES: ${{ vars.TACTUS_SUITE_TIMEOUT_MINUTES }}
+
+concurrency:
+  group: tactus-testbed-ci
+  cancel-in-progress: false
+
+jobs:
+  testbed:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '--action-testbed') ||
+      contains(github.event.pull_request.title, '--action-testbed') ||
+      contains(github.event.pull_request.body, '--action-testbed')
+    runs-on: [self-hosted, tactus]
+    timeout-minutes: 300
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Free local disk (poetry venv + cache)
+        uses: ./.github/actions/free-local-disk
+        with:
+          extra_patterns: ci_run_*.toml
+
+      - name: Set github credentials
+        uses: ./.github/actions/setup-github-credentials
+        with:
+          github_token: ${{ env.GITHUB_TOKEN }}
+
+      - id: resolve
+        name: Resolve IAL ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/.github/sh/helpers.sh"
+          ial_ref=$(ci_resolve_ial_ref "${{ github.event.inputs.ial_tag }}" "${{ github.event.inputs.ial_git_version }}")
+          if [ -n "$ial_ref" ]; then
+            echo "should_compile=true" >> "$GITHUB_OUTPUT"
+            echo "ial_ref=$ial_ref" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_compile=false" >> "$GITHUB_OUTPUT"
+            echo "ial_ref=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ensure poetry on HPC
+        uses: ./.github/actions/ensure-poetry
+
+      - name: Point .venv at $SCRATCH
+        uses: ./.github/actions/setup-venv-scratch
+
+      - name: Install the project (on HPC)
+        shell: bash
+        run: |
+          source "$GITHUB_WORKSPACE/.github/sh/helpers.sh"
+          helper_py_exec poetry install --no-interaction
+
+      - id: compile
+        name: Compile IAL (if a version was given)
+        if: steps.resolve.outputs.should_compile == 'true'
+        uses: ./.github/actions/run-compile
+        with:
+          ial_tag: ${{ steps.resolve.outputs.ial_ref }}
+          dry_run: "false"
+
+      - name: Upload compile logs
+        if: always() && steps.resolve.outputs.should_compile == 'true' && steps.compile.outputs.artifact_paths != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: tactus-testbed-compile-${{ github.run_id }}
+          path: ${{ steps.compile.outputs.artifact_paths }}
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Cleanup compile sub-step
+        if: always() && steps.resolve.outputs.should_compile == 'true' && vars.TACTUS_ECF_SUITES_AUTO_CLEANUP == 'true'
+        uses: ./.github/actions/cleanup-tactus-run
+        with:
+          scope: compile
+          config_file: ${{ steps.compile.outputs.config_file }}
+
+      - id: testbed
+        name: Run testbed via tactus
+        uses: ./.github/actions/run-testbed
+        with:
+          test_config: ${{ github.event.inputs.test_config || vars.TACTUS_TEST_CONFIG || 'tactus/data/tests/atos_bologna_CY49t2.toml' }}
+          case_selection: ${{ github.event.inputs.case_selection || vars.TACTUS_TESTBED_CASE_SELECTION || '' }}
+          ial_version: ${{ steps.resolve.outputs.ial_ref }}
+
+      - name: Cancel suites
+        if: cancelled()
+        uses: ./.github/actions/cancel-tactus-run
+
+      - name: Upload testbed logs and check summaries
+        if: always() && steps.testbed.outputs.artifact_paths != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: tactus-testbed-${{ github.run_id }}
+          path: ${{ steps.testbed.outputs.artifact_paths }}
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Cleanup
+        if: always() && vars.TACTUS_ECF_SUITES_AUTO_CLEANUP == 'true'
+        uses: ./.github/actions/cleanup-tactus-run
+        with:
+          scope: testbed
+          test_dir: ${{ steps.testbed.outputs.test_dir }}
+
+      - name: Sweep any leftover suites for this run
+        if: always() && steps.testbed.outputs.run_tag != '' && vars.TACTUS_ECF_SUITES_AUTO_CLEANUP == 'true'
+        continue-on-error: true
+        shell: bash
+        run: scripts/ci/sweep_suites.sh "${{ steps.testbed.outputs.run_tag }}"
+
+      - name: Free local disk (poetry venv + cache)
+        if: always()
+        uses: ./.github/actions/free-local-disk
+        with:
+          extra_patterns: ci_run_*.toml

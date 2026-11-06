@@ -1,0 +1,61 @@
+name: Monitor tactus suite
+description: Follow submitted suites and summarize
+
+inputs:
+  mode:
+    description: compile or testbed
+    required: true
+  config_file:
+    description: Config to monitor
+    required: true
+  default_timeout_minutes:
+    description: Timeout when TACTUS_SUITE_TIMEOUT_MINUTES is unset
+    required: true
+
+outputs:
+  artifact_paths:
+    description: Staged artifact glob
+    value: ${{ steps.monitor.outputs.artifact_paths }}
+  status:
+    description: PASS or FAIL
+    value: ${{ steps.monitor.outputs.status }}
+
+runs:
+  using: composite
+  steps:
+    - id: monitor
+      name: Follow suite(s) and summarize
+      shell: bash
+      run: |
+        set -o pipefail
+        source "$GITHUB_WORKSPACE/.github/sh/helpers.sh"
+        rm -f ci_artifact_casedirs.txt ci_failed_outputs.txt ci_step_summary.md
+        printf '%s\n' "${{ inputs.mode }}" "${{ inputs.config_file }}" > ci_monitor_target.txt
+        set +e
+        helper_py_exec env GITHUB_STEP_SUMMARY="$GITHUB_WORKSPACE/ci_step_summary.md" \
+          python3 scripts/ci/monitor_suite.py \
+          --mode "${{ inputs.mode }}" \
+          --config "${{ inputs.config_file }}" \
+          --poll-interval-seconds "${{ env.TACTUS_POLL_INTERVAL_SECONDS || '60' }}" \
+          --timeout-minutes "${{ env.TACTUS_SUITE_TIMEOUT_MINUTES || inputs.default_timeout_minutes }}" \
+          --artifact-manifest ci_artifact_casedirs.txt \
+          --failed-outputs-manifest ci_failed_outputs.txt
+        rc=$?
+        set -e
+
+        if [ -f ci_step_summary.md ]; then
+          cat ci_step_summary.md >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        artifact_paths=""
+        if [ -f ci_artifact_casedirs.txt ]; then
+          helper_exec "cd '$PWD' && bash .github/sh/stage_artifacts.sh ci_artifact_casedirs.txt ci_failed_outputs.txt ci_artifacts" || true
+          artifact_paths="ci_artifacts/**"
+        fi
+        {
+          echo "artifact_paths<<EOF_ARTIFACT_PATHS"
+          echo "$artifact_paths"
+          echo "EOF_ARTIFACT_PATHS"
+        } >> "$GITHUB_OUTPUT"
+        echo "status=$([ $rc -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_OUTPUT"
+        exit $rc
